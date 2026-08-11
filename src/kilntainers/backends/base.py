@@ -161,6 +161,15 @@ class Backend(ABC):
         self._config = config
 
     @classmethod
+    def prepare_runtime(cls) -> None:
+        """Prepare process-wide state before the server event loop is created.
+
+        Most backends need no preparation. Backends with SDKs that configure
+        global runtime state can override this hook so those changes apply only
+        when that backend is selected.
+        """
+
+    @classmethod
     @abstractmethod
     def add_cli_arguments(cls, group: argparse._ArgumentGroup) -> None:
         """Register backend-specific CLI arguments on the given argparse group.

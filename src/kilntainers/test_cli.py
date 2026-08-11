@@ -1,5 +1,7 @@
 """Tests for CLI argument parsing, config construction, and validation."""
 
+import subprocess
+import sys
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -555,11 +557,14 @@ def test_main_keyboard_interrupt():
         mock_args = MagicMock()
         mock_parser.return_value.parse_args.return_value = mock_args
         mock_build_configs.return_value = (ServerConfig(), DockerBackendConfig())
-        mock_get_backend.return_value = lambda _: mock_backend
+        mock_backend_class = MagicMock(return_value=mock_backend)
+        mock_get_backend.return_value = mock_backend_class
         mock_create_server.return_value = mock_mcp
 
         # Should not raise
         main()
+
+        mock_backend_class.prepare_runtime.assert_called_once_with()
 
 
 # ================
@@ -584,3 +589,20 @@ def test_help_output_structure():
     assert "--engine" in help_text
     assert "--image" in help_text
     assert "--docker-run-flag" in help_text
+
+
+def test_loading_modal_backend_preserves_event_loop_policy_in_fresh_process():
+    """Loading Modal's backend class must not import its policy-changing SDK."""
+    script = """
+import asyncio
+from kilntainers.backends import get_backend_class
+
+policy_before = type(asyncio.get_event_loop_policy())
+get_backend_class("modal")
+policy_after = type(asyncio.get_event_loop_policy())
+raise SystemExit(0 if policy_after is policy_before else 1)
+"""
+
+    result = subprocess.run([sys.executable, "-c", script], check=False)
+
+    assert result.returncode == 0

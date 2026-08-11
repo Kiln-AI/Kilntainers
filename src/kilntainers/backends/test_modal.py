@@ -8,6 +8,7 @@ import asyncio
 
 import pytest
 
+import kilntainers.backends.modal as modal_backend_module
 from kilntainers.backends.base import ExecRequest
 from kilntainers.backends.modal import (
     ModalBackend,
@@ -217,6 +218,63 @@ def default_config():
 
 
 # --- ModalBackend tests ---
+
+
+class TestModalRuntimePreparation:
+    """Tests for containing Modal's process-wide import side effects."""
+
+    def test_lazy_import_restores_event_loop_policy(self, monkeypatch):
+        original_policy = object()
+        imported_sdk = object()
+        restored_policies = []
+
+        monkeypatch.setattr(modal_backend_module, "modal", None)
+        monkeypatch.setattr(
+            modal_backend_module.asyncio,
+            "get_event_loop_policy",
+            lambda: original_policy,
+        )
+        monkeypatch.setattr(
+            modal_backend_module.asyncio,
+            "set_event_loop_policy",
+            restored_policies.append,
+        )
+        monkeypatch.setattr(
+            modal_backend_module.importlib,
+            "import_module",
+            lambda name: imported_sdk,
+        )
+
+        result = modal_backend_module._get_modal_sdk()
+
+        assert result is imported_sdk
+        assert restored_policies == [original_policy]
+
+    def test_selected_modal_backend_keeps_sdk_policy_change(self, monkeypatch):
+        imported_sdk = object()
+
+        monkeypatch.setattr(modal_backend_module, "modal", None)
+        monkeypatch.setattr(
+            modal_backend_module.asyncio,
+            "get_event_loop_policy",
+            lambda: pytest.fail("selected Modal startup must not preserve the policy"),
+        )
+        monkeypatch.setattr(
+            modal_backend_module.asyncio,
+            "set_event_loop_policy",
+            lambda policy: pytest.fail(
+                "selected Modal startup must not restore policy"
+            ),
+        )
+        monkeypatch.setattr(
+            modal_backend_module.importlib,
+            "import_module",
+            lambda name: imported_sdk,
+        )
+
+        ModalBackend.prepare_runtime()
+
+        assert modal_backend_module.modal is imported_sdk
 
 
 class TestModalBackendConfig:

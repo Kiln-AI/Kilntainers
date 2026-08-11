@@ -10,6 +10,7 @@ import tempfile
 
 import pytest
 
+import kilntainers.backends.wasm as wasm_backend_module
 from kilntainers.backends.base import ExecRequest
 from kilntainers.backends.wasm import (
     GoBusyBoxBackend,
@@ -22,6 +23,24 @@ from kilntainers.backends.wasm import (
 from kilntainers.errors import BackendError, SandboxDiedError
 
 # --- Mock wasmtime utilities ---
+
+
+def test_windows_architecture_fallback_uses_python_platform(monkeypatch):
+    """Wasmtime gets a stable architecture when Windows environment data is absent."""
+    monkeypatch.setattr(wasm_backend_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        wasm_backend_module.sysconfig,
+        "get_platform",
+        lambda: "win-amd64",
+    )
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+    monkeypatch.delenv("PROCESSOR_ARCHITECTURE", raising=False)
+    monkeypatch.setattr(wasm_backend_module.platform, "_uname_cache", object())
+
+    wasm_backend_module._ensure_windows_processor_architecture()
+
+    assert os.environ["PROCESSOR_ARCHITECTURE"] == "AMD64"
+    assert wasm_backend_module.platform._uname_cache is None
 
 
 class MockWasiConfig:

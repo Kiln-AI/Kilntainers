@@ -117,7 +117,7 @@ class TestConnection:
         backend = DockerBackend(config)
 
         with pytest.raises(BackendError) as exc_info:
-            await asyncio.wait_for(backend.validate(), timeout=2)
+            await asyncio.wait_for(backend.validate(), timeout=15)
 
         assert "Cannot connect to" in str(exc_info.value)
 

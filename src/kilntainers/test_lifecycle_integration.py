@@ -254,10 +254,12 @@ class TestDeathPropagation:
         """Sandbox death triggers death callback in stdio mode."""
         # Use a list to capture death notifications without sending SIGTERM
         death_notifications: list[None] = []
+        death_event = asyncio.Event()
 
         def death_callback() -> None:
             """Capture death notification instead of sending SIGTERM."""
             death_notifications.append(None)
+            death_event.set()
 
         lifespan_fn = create_lifespan(backend, "stdio", death_callback=death_callback)
         mock_server = MagicMock()
@@ -273,8 +275,8 @@ class TestDeathPropagation:
                 capture_output=True,
             )
 
-            # Give death task time to process
-            await asyncio.sleep(0.2)
+            # Wait for the death monitor instead of relying on scheduling speed.
+            await asyncio.wait_for(death_event.wait(), timeout=10)
 
         # Verify death callback was invoked
         assert len(death_notifications) >= 1

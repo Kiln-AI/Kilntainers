@@ -285,6 +285,7 @@ def main() -> None:
     # Create backend (validation happens lazily on first sandbox_exec)
     backend_name = args.backend
     backend_class = get_backend_class(backend_name)
+    backend_class.prepare_runtime()
     backend = backend_class(backend_config)
 
     # Create the MCP server (assembles tool description, registers tool)
@@ -315,6 +316,8 @@ def main() -> None:
         os.kill(os.getpid(), signal.SIGINT)
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _handle_sigterm)
 
     try:
         mcp.run(transport=transport)
