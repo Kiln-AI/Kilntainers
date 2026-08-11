@@ -1,16 +1,44 @@
 """Modal backend implementation."""
 
+from __future__ import annotations
+
 import argparse
 import asyncio
+import importlib
 import os
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
-import modal
+if TYPE_CHECKING:
+    import modal
+else:
+    modal = None
 
 from kilntainers.backends.base import Backend, ExecRequest, ExecResult, Sandbox
 from kilntainers.config import BackendConfig
 from kilntainers.errors import BackendError, SandboxDiedError
+
+
+def _get_modal_sdk(*, preserve_event_loop_policy: bool = True) -> Any:
+    """Import Modal only when the Modal backend is actually used.
+
+    Importing Modal changes the global asyncio event-loop policy on Windows.
+    Imports from an already-running process preserve its policy so Modal cannot
+    contaminate later event loops used by other backends. ModalBackend's startup
+    hook deliberately allows the change when Modal is the selected backend.
+    """
+    global modal
+    if modal is None:
+        previous_policy = (
+            asyncio.get_event_loop_policy() if preserve_event_loop_policy else None
+        )
+        try:
+            modal = importlib.import_module("modal")
+        finally:
+            if previous_policy is not None:
+                asyncio.set_event_loop_policy(previous_policy)
+    return modal
 
 
 class _OutputLimitExceeded(Exception):
@@ -55,6 +83,11 @@ class ModalBackend(Backend):
     Manages Modal cloud sandbox lifecycle and command execution
     through the Modal Python SDK.
     """
+
+    @classmethod
+    def prepare_runtime(cls) -> None:
+        """Load Modal before loop creation so its Windows policy takes effect."""
+        _get_modal_sdk(preserve_event_loop_policy=False)
 
     @classmethod
     def add_cli_arguments(cls, group: argparse._ArgumentGroup) -> None:
@@ -143,20 +176,21 @@ class ModalBackend(Backend):
         """
         # Configure auth from CLI args (if provided)
         self._configure_auth()
+        modal_sdk = _get_modal_sdk()
 
         try:
-            self._app = await modal.App.lookup.aio(
+            self._app = await modal_sdk.App.lookup.aio(
                 self._config.app_name,
                 create_if_missing=True,
             )
-        except modal.exception.AuthError:
+        except modal_sdk.exception.AuthError:
             raise BackendError(
                 "Modal authentication failed. Either:\n"
                 "  - Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET environment variables\n"
                 "  - Run 'modal token set' to configure credentials\n"
                 "  - Pass --modal-token-id and --modal-token-secret"
             )
-        except modal.exception.ConnectionError:
+        except modal_sdk.exception.ConnectionError:
             raise BackendError(
                 "Cannot connect to Modal. Check your network connection "
                 "and Modal service status at https://status.modal.com"
@@ -164,12 +198,13 @@ class ModalBackend(Backend):
 
     def _build_image(self) -> modal.Image:
         """Construct the Modal Image from configuration."""
+        modal_sdk = _get_modal_sdk()
         if self._config.image is None:
-            return modal.Image.debian_slim()
+            return modal_sdk.Image.debian_slim()
         else:
-            return modal.Image.from_registry(self._config.image)
+            return modal_sdk.Image.from_registry(self._config.image)
 
-    async def _create_sandbox(self) -> "ModalSandbox":
+    async def _create_sandbox(self) -> ModalSandbox:
         """Create a Modal sandbox.
 
         Performs the full startup sequence:
@@ -181,13 +216,14 @@ class ModalBackend(Backend):
         """
         # 1. Build image
         image = self._build_image()
+        modal_sdk = _get_modal_sdk()
 
         # 2. Build GPU config (if specified)
         gpu_config = self._config.gpu
 
         # 3. Create sandbox
         try:
-            sb = await modal.Sandbox.create.aio(
+            sb = await modal_sdk.Sandbox.create.aio(
                 app=self._app,
                 image=image,
                 timeout=self._config.sandbox_timeout,
@@ -197,9 +233,9 @@ class ModalBackend(Backend):
                 region=self._config.region,
                 block_network=not self._config.network_enabled,
             )
-        except modal.exception.InvalidError as e:
+        except modal_sdk.exception.InvalidError as e:
             raise BackendError(f"Failed to create Modal sandbox: {e}")
-        except modal.exception.NotFoundError:
+        except modal_sdk.exception.NotFoundError:
             raise BackendError(
                 f"Modal image not found: '{self._config.image}'. "
                 f"Check that the image name is correct and the registry is accessible."
@@ -365,6 +401,7 @@ class ModalSandbox(Sandbox):
         """Core exec implementation."""
         exec_args = self._build_exec_args(request)
         exec_kwargs = self._build_exec_kwargs(request)
+        modal_sdk = _get_modal_sdk()
 
         start_time = time.monotonic()
 
@@ -428,14 +465,14 @@ class ModalSandbox(Sandbox):
                 exec_duration_ms=elapsed_ms,
             )
 
-        except modal.exception.SandboxTerminatedError:
+        except modal_sdk.exception.SandboxTerminatedError:
             if not self._stop_requested:
                 raise SandboxDiedError(
                     f"Sandbox {self.sandbox_id} died during command execution"
                 )
             raise SandboxDiedError("Sandbox has been stopped")
 
-        except modal.exception.SandboxTimeoutError:
+        except modal_sdk.exception.SandboxTimeoutError:
             # Sandbox lifetime timeout expired (not exec timeout)
             raise SandboxDiedError(
                 f"Sandbox {self.sandbox_id} lifetime timeout expired"

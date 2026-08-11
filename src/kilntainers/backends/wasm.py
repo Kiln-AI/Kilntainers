@@ -3,12 +3,45 @@
 import argparse
 import asyncio
 import os
+import platform
 import shutil
+import sys
+import sysconfig
 import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+
+def _ensure_windows_processor_architecture() -> None:
+    """Provide Wasmtime's fallback architecture when Windows omits it.
+
+    Wasmtime first queries WMI and falls back to PROCESSOR_ARCHITECTURE.
+    Parallel test workers can overwhelm WMI, while some environments omit the
+    fallback variable entirely. Python's build platform is deterministic and
+    identifies the same architecture without another system query.
+    """
+    if sys.platform != "win32":
+        return
+    if os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get(
+        "PROCESSOR_ARCHITECTURE"
+    ):
+        return
+
+    python_platform = sysconfig.get_platform().lower()
+    architecture = {
+        "win-amd64": "AMD64",
+        "win-arm64": "ARM64",
+    }.get(python_platform)
+    if architecture is not None:
+        os.environ["PROCESSOR_ARCHITECTURE"] = architecture
+        # A failed WMI query may already have cached an empty machine value.
+        # Clear it so Wasmtime's platform.machine() call uses the fallback.
+        platform._uname_cache = None  # ty: ignore[unresolved-attribute]
+
+
+_ensure_windows_processor_architecture()
 
 if TYPE_CHECKING:
     import wasmtime  # type: ignore[import-not-found]

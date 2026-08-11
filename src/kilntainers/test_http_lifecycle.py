@@ -140,6 +140,11 @@ class TestHTTPSessionIsolation:
         """
         import asyncio
         import json
+        import signal
+        import socket
+        import subprocess
+        import sys
+        import uuid
 
         from mcp.client.session import ClientSession
         from mcp.client.streamable_http import streamable_http_client
@@ -147,11 +152,17 @@ class TestHTTPSessionIsolation:
         # Skip if docker is not available
         validate_engine_available("docker")
 
-        # Start HTTP server as subprocess (use random port to avoid conflicts)
+        # Reserve a dynamic port to avoid conflicts between parallel workers.
+        with socket.socket() as port_socket:
+            port_socket.bind(("127.0.0.1", 0))
+            server_port = port_socket.getsockname()[1]
+        test_container_label = f"kilntainers-http-test={uuid.uuid4().hex}"
+
+        # Use the current interpreter directly so terminating this process also
+        # terminates the server, rather than leaving a child behind an `uv run`
+        # wrapper.
         server_proc = await asyncio.create_subprocess_exec(
-            "uv",
-            "run",
-            "python",
+            sys.executable,
             "-m",
             "kilntainers",
             "--transport",
@@ -159,13 +170,33 @@ class TestHTTPSessionIsolation:
             "--host",
             "127.0.0.1",
             "--port",
-            "18435",
+            str(server_port),
+            f"--docker-run-flag=--label={test_container_label}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+            ),
         )
 
-        # Wait for server to start
-        await asyncio.sleep(3)
+        # Wait until the server accepts connections, with a bounded deadline.
+        startup_deadline = asyncio.get_running_loop().time() + 15
+        server_ready = False
+        while True:
+            if server_proc.returncode is not None:
+                break
+            try:
+                _reader, writer = await asyncio.open_connection(
+                    "127.0.0.1", server_port
+                )
+                writer.close()
+                await writer.wait_closed()
+                server_ready = True
+                break
+            except OSError:
+                if asyncio.get_running_loop().time() >= startup_deadline:
+                    break
+                await asyncio.sleep(0.1)
 
         # Check if server started successfully
         if server_proc.returncode is not None:
@@ -176,8 +207,16 @@ class TestHTTPSessionIsolation:
             raise RuntimeError(
                 f"Server failed to start. Return code: {server_proc.returncode}. Stderr: {stderr_str}"
             )
+        if not server_ready:
+            server_proc.terminate()
+            try:
+                await asyncio.wait_for(server_proc.wait(), timeout=15)
+            except TimeoutError:
+                server_proc.kill()
+                await server_proc.wait()
+            raise RuntimeError("Server did not accept connections within 15 seconds")
 
-        server_url = "http://127.0.0.1:18435/mcp"
+        server_url = f"http://127.0.0.1:{server_port}/mcp"
 
         # Events to coordinate execution order (no sleep/timing dependencies)
         client1_ready = asyncio.Event()
@@ -269,7 +308,42 @@ class TestHTTPSessionIsolation:
         finally:
             # Clean up server
             if server_proc.returncode is None:
-                server_proc.terminate()
-                await server_proc.wait()
+                if sys.platform == "win32":
+                    server_proc.send_signal(signal.CTRL_BREAK_EVENT)
+                else:
+                    server_proc.terminate()
+                try:
+                    await asyncio.wait_for(server_proc.wait(), timeout=15)
+                except TimeoutError:
+                    server_proc.kill()
+                    await server_proc.wait()
             else:
                 await server_proc.wait()
+
+            # Session shutdown is best-effort if the server is interrupted.
+            # Remove only containers uniquely labeled by this test run.
+            container_query = await asyncio.create_subprocess_exec(
+                "docker",
+                "ps",
+                "-aq",
+                "--filter",
+                f"label={test_container_label}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            query_stdout, _query_stderr = await asyncio.wait_for(
+                container_query.communicate(), timeout=10
+            )
+            container_ids = query_stdout.decode().split()
+            if container_ids:
+                container_stop = await asyncio.create_subprocess_exec(
+                    "docker",
+                    "stop",
+                    *container_ids,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(
+                    container_stop.communicate(),
+                    timeout=20,
+                )
